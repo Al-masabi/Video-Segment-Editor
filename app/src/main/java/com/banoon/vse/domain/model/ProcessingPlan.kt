@@ -1,18 +1,32 @@
 package com.banoon.vse.domain.model
 
-/** طريقة معالجة مقطع واحد من الخطة. */
+/** طريقة معالجة جزء واحد قابل للتنفيذ فعليًا. */
 enum class SegmentProcessingMode {
     /** نسخ مباشر بدون إعادة ترميز — أسرع وبلا فقدان جودة (Lossless). */
     STREAM_COPY,
 
-    /** إعادة ترميز جزئية عند حدود لا تقع على keyframe. */
+    /** إعادة ترميز — تُستخدم فقط للأجزاء القريبة من حدود لا تقع على keyframe. */
     RE_ENCODE_BOUNDARY
 }
 
-/** مقطع واحد سيبقى في الملف الناتج، مع تحديد طريقة معالجته. */
-data class PlannedSegment(
+/** جزء واحد قابل للتنفيذ فعليًا (نطاق زمني + طريقة معالجته). */
+data class SegmentChunk(
     val range: TimeRange,
     val mode: SegmentProcessingMode
+)
+
+/**
+ * مقطع واحد سيبقى في الملف الناتج، مقسّم لأجزاء قابلة للتنفيذ (chunks).
+ *
+ * بدل إعادة ترميز المقطع كاملًا لما حدوده لا تقع بالضبط على keyframe، نقسّمه
+ * إلى: جزء صغير عند البداية (إعادة ترميز، لو الحد غير محاذٍ)، جزء أوسط
+ * (نسخ مباشر بين أقرب نقطتي keyframe)، وجزء صغير عند النهاية (إعادة ترميز
+ * عند الحاجة). هذا يقلل زمن المعالجة بشكل كبير مقارنة بإعادة ترميز المقطع
+ * بالكامل.
+ */
+data class PlannedSegment(
+    val range: TimeRange,
+    val chunks: List<SegmentChunk>
 )
 
 enum class OutputMode { REMOVE_SEGMENTS, EXTRACT_SEGMENTS_MERGED, EXTRACT_SEGMENTS_SEPARATE }
@@ -31,7 +45,7 @@ data class ProcessingPlan(
 ) {
     /** هل الخطة بالكامل قابلة للتنفيذ بدون أي إعادة ترميز؟ */
     val isFullyLossless: Boolean
-        get() = segments.all { it.mode == SegmentProcessingMode.STREAM_COPY }
+        get() = segments.all { seg -> seg.chunks.all { it.mode == SegmentProcessingMode.STREAM_COPY } }
 }
 
 data class ProcessingResult(

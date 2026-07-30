@@ -58,22 +58,60 @@ class SmartRenderingPlanner(
         )
     }
 
-    /** يحوّل مدى زمني واحد إلى مقطع مخطط له، بتحديد هل حدوده على keyframe أم لا. */
+    /**
+     * يحوّل مدى زمني واحد إلى مقطع مخطط له، مقسّم لأجزاء (chunks):
+     * - لو البداية غير محاذية لـ keyframe: جزء صغير إعادة ترميز من البداية
+     *   حتى أول keyframe بعدها.
+     * - الجزء الأوسط (بين أول/آخر keyframe مناسب): نسخ مباشر دائمًا.
+     * - لو النهاية غير محاذية: جزء صغير إعادة ترميز من آخر keyframe قبلها
+     *   حتى النهاية.
+     * - لو ما فيه أي keyframe مناسب بين البداية والنهاية (مقطع قصير جدًا أو
+     *   فجوة keyframes كبيرة): إعادة ترميز المقطع بالكامل كخطة احتياطية آمنة.
+     */
     private fun toPlannedSegment(range: TimeRange, keyframes: List<KeyframeTimestamp>): PlannedSegment {
-        val startOnKeyframe = isNearAnyKeyframe(range.start, keyframes)
-        val endOnKeyframe = isNearAnyKeyframe(range.end, keyframes)
-        val mode = if (startOnKeyframe && endOnKeyframe) {
-            SegmentProcessingMode.STREAM_COPY
-        } else {
-            SegmentProcessingMode.RE_ENCODE_BOUNDARY
+        if (keyframes.isEmpty()) {
+            return PlannedSegment(range, listOf(SegmentChunk(range, SegmentProcessingMode.RE_ENCODE_BOUNDARY)))
         }
-        return PlannedSegment(range = range, mode = mode)
+
+        val sortedTimes = keyframes.map { it.time }.sorted()
+        val startAligned = isNearAnyTime(range.start, sortedTimes)
+        val endAligned = isNearAnyTime(range.end, sortedTimes)
+
+        val headKeyframe = sortedTimes.firstOrNull { it >= range.start }
+        val tailKeyframe = sortedTimes.lastOrNull { it <= range.end }
+
+        if (headKeyframe == null || tailKeyframe == null || headKeyframe >= tailKeyframe) {
+            // لا يوجد keyframe مناسب بين البداية والنهاية → إعادة ترميز آمنة للمقطع كاملًا
+            return PlannedSegment(range, listOf(SegmentChunk(range, SegmentProcessingMode.RE_ENCODE_BOUNDARY)))
+        }
+
+        val chunks = mutableListOf<SegmentChunk>()
+
+        if (!startAligned) {
+            chunks.add(SegmentChunk(TimeRange(range.start, headKeyframe), SegmentProcessingMode.RE_ENCODE_BOUNDARY))
+        }
+
+        val middleStart = if (startAligned) range.start else headKeyframe
+        if (middleStart < tailKeyframe) {
+            chunks.add(SegmentChunk(TimeRange(middleStart, tailKeyframe), SegmentProcessingMode.STREAM_COPY))
+        }
+
+        if (!endAligned && tailKeyframe < range.end) {
+            chunks.add(SegmentChunk(TimeRange(tailKeyframe, range.end), SegmentProcessingMode.RE_ENCODE_BOUNDARY))
+        }
+
+        if (chunks.isEmpty()) {
+            // احتياط نادر: لو ما انبنى أي جزء، انسخ المقطع كاملًا مباشرة
+            chunks.add(SegmentChunk(range, SegmentProcessingMode.STREAM_COPY))
+        }
+
+        return PlannedSegment(range, chunks)
     }
 
-    private fun isNearAnyKeyframe(time: Microseconds, keyframes: List<KeyframeTimestamp>): Boolean {
-        if (keyframes.isEmpty()) return false // لا معلومات كافية → افتراض الأسوأ (إعادة ترميز)
-        return keyframes.any { kf ->
-            val diff = kotlin.math.abs(kf.time.value - time.value)
+    private fun isNearAnyTime(time: Microseconds, sortedTimes: List<Microseconds>): Boolean {
+        if (sortedTimes.isEmpty()) return false
+        return sortedTimes.any { kf ->
+            val diff = kotlin.math.abs(kf.value - time.value)
             diff <= keyframeToleranceUs.value
         }
     }

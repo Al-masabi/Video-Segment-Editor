@@ -7,6 +7,7 @@ import com.banoon.vse.domain.model.OutputMode
 import com.banoon.vse.domain.model.PlannedSegment
 import com.banoon.vse.domain.model.ProcessingPlan
 import com.banoon.vse.domain.model.ProcessingResult
+import com.banoon.vse.domain.model.SegmentChunk
 import com.banoon.vse.domain.model.SegmentProcessingMode
 import com.banoon.vse.domain.model.VideoStreamInfo
 import com.banoon.vse.domain.port.FfmpegPort
@@ -24,16 +25,16 @@ import kotlin.coroutines.resume
  * تطبيق حقيقي لمنفذ FFmpeg باستخدام FFmpegKit.
  *
  * الاستراتيجية المتبعة (Hybrid Smart Rendering):
- * 1. كل مقطع مخطط له (PlannedSegment) يُستخرج أولًا إلى ملف مؤقت:
- *    - STREAM_COPY  → `-ss/-to -c copy` (بدون إعادة ترميز، أسرع، بلا فقد جودة).
- *    - RE_ENCODE_BOUNDARY → إعادة ترميز بنفس مواصفات المصدر (كودك/دقة/معدل
- *      إطارات) للحفاظ على التطابق البصري الكامل مع بقية الفيديو.
- * 2. الملفات المؤقتة تُدمج عبر concat demuxer الخاص بـ FFmpeg (بدون إعادة
- *    ترميز في هذه الخطوة، لأن كل الملفات أصبحت متوافقة بنفس الترميز).
+ * 1. كل مقطع مخطط له (PlannedSegment) مقسّم لأجزاء (chunks) عبر
+ *    SmartRenderingPlanner: الأجزاء القريبة من حدود لا تقع على keyframe
+ *    تُعاد ترميزها (صغيرة جدًا عادة، ثانية أو ثانيتين)، والجزء الأوسط
+ *    بين أقرب نقطتي keyframe يُنسخ مباشرة بدون إعادة ترميز.
+ * 2. كل جزء يُستخرج لملف مؤقت مستقل، ثم تُدمج أجزاء المقطع الواحد بملف
+ *    واحد، ثم تُدمج كل المقاطع ببعضها للناتج النهائي — كل ذلك عبر concat
+ *    demuxer الخاص بـ FFmpeg (بدون إعادة ترميز إضافية في خطوات الدمج).
  *
- * ملاحظة مهمة: هذا أول تطبيق فعلي (MVP)، وسيُطوَّر لاحقًا لدعم إعادة ترميز
- * جزء صغير جدًا من الإطارات القريبة من الحد فقط (بدل المقطع كاملًا) لتقليل
- * زمن المعالجة أكثر — وهذا موثّق كخطوة تالية في README.
+ * هذا يقلل زمن المعالجة بشكل كبير مقارنة بإعادة ترميز المقطع كاملًا، لأن
+ * الجزء المُعاد ترميزه فعليًا صغير جدًا بدل المقطع بأكمله.
  */
 @Singleton
 class FFmpegKitAdapter @Inject constructor() : FfmpegPort {
@@ -71,10 +72,11 @@ class FFmpegKitAdapter @Inject constructor() : FfmpegPort {
 
                     OutputMode.EXTRACT_SEGMENTS_SEPARATE -> {
                         val outputs = plan.segments.mapIndexed { i, seg ->
-                            val outputFile = File(outDir, "clip_${i + 1}${extensionOf(plan.inputFilePath)}")
-                            extractSegmentDirect(plan.inputFilePath, seg, outputFile, sourceVideo)
+                            val segmentFile = extractSegment(plan.inputFilePath, seg, tempDir, index = i, sourceVideo)
+                            val finalFile = File(outDir, "clip_${i + 1}${extensionOf(plan.inputFilePath)}")
+                            segmentFile.copyTo(finalFile, overwrite = true)
                             onProgress((i + 1).toFloat() / plan.segments.size)
-                            outputFile.absolutePath
+                            finalFile.absolutePath
                         }
                         ProcessingResult(
                             outputFilePaths = outputs,
@@ -95,6 +97,11 @@ class FFmpegKitAdapter @Inject constructor() : FfmpegPort {
         currentSession?.sessionId?.let { FFmpegKit.cancel(it) }
     }
 
+    /**
+     * يستخرج مقطعًا كاملًا (PlannedSegment) إلى ملف واحد. لو المقطع مقسّم
+     * لأكثر من جزء (مثلًا: جزء إعادة ترميز صغير + جزء نسخ أوسط)، نستخرج كل
+     * جزء لملف مؤقت مستقل ثم ندمجهم بملف واحد يمثل المقطع الكامل.
+     */
     private suspend fun extractSegment(
         inputPath: String,
         segment: PlannedSegment,
@@ -102,21 +109,32 @@ class FFmpegKitAdapter @Inject constructor() : FfmpegPort {
         index: Int,
         sourceVideo: VideoStreamInfo?
     ): File {
-        val outputFile = File(tempDir, "seg_$index${extensionOf(inputPath)}")
-        extractSegmentDirect(inputPath, segment, outputFile, sourceVideo)
-        return outputFile
+        if (segment.chunks.size == 1) {
+            val outputFile = File(tempDir, "seg_$index${extensionOf(inputPath)}")
+            extractChunk(inputPath, segment.chunks[0], outputFile, sourceVideo)
+            return outputFile
+        }
+
+        val chunkFiles = segment.chunks.mapIndexed { ci, chunk ->
+            val chunkFile = File(tempDir, "seg_${index}_chunk_$ci${extensionOf(inputPath)}")
+            extractChunk(inputPath, chunk, chunkFile, sourceVideo)
+            chunkFile
+        }
+        val segmentFile = File(tempDir, "seg_$index${extensionOf(inputPath)}")
+        concatSegments(chunkFiles, segmentFile)
+        return segmentFile
     }
 
-    private suspend fun extractSegmentDirect(
+    private suspend fun extractChunk(
         inputPath: String,
-        segment: PlannedSegment,
+        chunk: SegmentChunk,
         outputFile: File,
         sourceVideo: VideoStreamInfo?
     ) {
-        val startSec = segment.range.start.value / 1_000_000.0
-        val durationSec = segment.range.duration.value / 1_000_000.0
+        val startSec = chunk.range.start.value / 1_000_000.0
+        val durationSec = chunk.range.duration.value / 1_000_000.0
 
-        val command = when (segment.mode) {
+        val command = when (chunk.mode) {
             SegmentProcessingMode.STREAM_COPY -> {
                 // المدى واقع على keyframe، فالبحث السريع قبل -i دقيق بما يكفي
                 // وأسرع بكثير من فك التشفير الكامل.
@@ -127,8 +145,8 @@ class FFmpegKitAdapter @Inject constructor() : FfmpegPort {
                 // الدقة على مستوى الإطار مهمة هنا لأن الحد لا يقع على keyframe.
                 // نستخدم seek من مرحلتين: seek سريع (تقريبي) قبل -i لأقرب نقطة
                 // آمنة قبل البداية بـ 5 ثوانٍ، ثم seek دقيق بعد -i لباقي الفارق.
-                // هذا أسرع بكثير من فك تشفير الفيديو كاملًا من البداية، مع
-                // الحفاظ على الدقة الكاملة على مستوى الإطار.
+                // بما إن الجزء نفسه أصبح صغيرًا جدًا الآن (ثانية أو ثانيتين
+                // بدل المقطع كاملًا)، هذا التحسين يقلل زمن المعالجة بشكل كبير.
                 val coarseSeek = (startSec - 5.0).coerceAtLeast(0.0)
                 val fineSeek = startSec - coarseSeek
                 val encodeArgs = buildReEncodeArgs(sourceVideo)

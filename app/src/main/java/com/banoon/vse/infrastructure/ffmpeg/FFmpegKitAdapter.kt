@@ -138,26 +138,25 @@ class FFmpegKitAdapter @Inject constructor() : FfmpegPort {
     }
 
     /**
-     * يبني وسائط إعادة الترميز بحيث تطابق كودك ودقة بت المصدر قدر الإمكان،
-     * بدل استخدام H.264 8-bit دائمًا (وهو ما كان يفقد جودة HDR/10-bit من
-     * مصادر HEVC). نستخدم CRF منخفض جدًا (جودة شبه بلا فقد) لأن هذا المقطع
-     * صغير جدًا (بضع ثوانٍ فقط عند حدود القطع).
+     * يبني وسائط إعادة الترميز بحيث تطابق كودك المصدر قدر الإمكان، مع
+     * إعدادات سرعة خاصة بكل كودك — لأن `-preset` خيار خاص بـ x264/x265 فقط؛
+     * تمريره لـ VP9 (libvpx-vp9) يُتجاهل بصمت ويرجع الترميز لأبطأ إعداد
+     * افتراضي (قد يبدو وكأن التطبيق "معلّق" بينما هو فعليًا يرمّز ببطء شديد).
      */
     private fun buildReEncodeArgs(sourceVideo: VideoStreamInfo?): String {
-        val videoCodec = when (sourceVideo?.codec) {
-            "hevc", "h265" -> "libx265"
-            "av1" -> "libaom-av1"
-            "vp9" -> "libvpx-vp9"
-            else -> "libx264" // h264 أو أي كودك غير معروف
-        }
         val pixFmt = sourceVideo?.pixelFormat?.takeIf { it != "unknown" } ?: "yuv420p"
-
         val hdrFlags = if (sourceVideo?.isHdr == true) {
-            // الحفاظ على البيانات الوصفية اللونية عند وجود HDR
             " -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc"
         } else ""
 
-        return "-c:v $videoCodec -pix_fmt $pixFmt -preset slow -crf 16$hdrFlags -c:a aac -b:a 320k"
+        val videoArgs = when (sourceVideo?.codec) {
+            "hevc", "h265" -> "-c:v libx265 -preset slow -crf 16"
+            "vp9" -> "-c:v libvpx-vp9 -crf 16 -b:v 0 -deadline good -cpu-used 4"
+            "av1" -> "-c:v libaom-av1 -crf 16 -b:v 0 -cpu-used 6"
+            else -> "-c:v libx264 -preset slow -crf 16" // h264 أو كودك غير معروف
+        }
+
+        return "$videoArgs -pix_fmt $pixFmt$hdrFlags -c:a aac -b:a 320k"
     }
 
     private fun concatSegments(segmentFiles: List<File>, outputFile: File) {

@@ -1,5 +1,7 @@
 package com.banoon.vse.infrastructure.ffmpeg
 
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import com.arthenica.ffmpegkit.FFprobeKit
 import com.arthenica.ffmpegkit.MediaInformation
 import com.arthenica.ffmpegkit.StreamInformation
@@ -20,12 +22,9 @@ import org.json.JSONObject
 import javax.inject.Inject
 
 /**
- * تطبيق حقيقي لمنفذ تحليل الوسائط باستخدام FFprobeKit.
- * ملاحظة: استخراج الـ keyframes الدقيق يتطلب تمريرة إضافية عبر
- * `ffprobe -show_frames -select_streams v -skip_frame nokey`، وهو ما
- * تنفذه دالة [extractKeyframes] بشكل منفصل عن معلومات الوسائط العامة،
- * ويُستدعى من [analyze] مباشرة عشان خدمة SmartRenderingPlanner تحصل على
- * بيانات keyframes حقيقية بدل قائمة فارغة دائمًا.
+ * تطبيق حقيقي لمنفذ تحليل الوسائط: التحليل العام (الكودك، الدقة، المسارات)
+ * عبر FFprobeKit، واستخراج نقاط keyframe عبر MediaExtractor الرسمي من
+ * أندرويد (أوثق من الاعتماد على تحليل نص مخرجات FFprobe لهذا الغرض).
  */
 class FFprobeAdapter @Inject constructor() : MediaProbePort {
 
@@ -125,26 +124,40 @@ class FFprobeAdapter @Inject constructor() : MediaProbePort {
     }
 
     /**
-     * يستخرج جميع نقاط الـ keyframe لمسار فيديو معيّن، مطلوب لقرارات
-     * Hybrid Smart Rendering. عملية منفصلة لأنها أثقل من التحليل العام.
+     * يستخرج جميع نقاط الـ keyframe عبر MediaExtractor (واجهة أندرويد
+     * الرسمية)، بدل الاعتماد على تحليل نص مخرجات FFprobe (كانت طريقة غير
+     * موثوقة عمليًا: لم يكن واضحًا هل FFmpegKit يضع نتائج -show_entries
+     * بنفس مكان "اللوق" الذي نقرأ منه، وثبت أنها ترجع فارغة دائمًا).
+     * MediaExtractor.seekTo(..., SEEK_TO_NEXT_SYNC) يقفز مباشرة من keyframe
+     * لآخر بدون فحص كل إطار، فهو سريع حتى على الفيديوهات الطويلة.
      */
     suspend fun extractKeyframes(filePath: String): Result<List<KeyframeTimestamp>> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val command = "-select_streams v:0 -show_entries frame=pkt_pts_time,key_frame " +
-                    "-of csv=print_section=0 \"$filePath\""
-                val session = FFprobeKit.execute(command)
-                val output = session.allLogsAsString ?: ""
-                output.lineSequence()
-                    .mapNotNull { line ->
-                        val parts = line.split(",")
-                        if (parts.size == 2 && parts[1].trim() == "1") {
-                            parts[0].trim().toDoubleOrNull()?.let {
-                                KeyframeTimestamp(Microseconds.fromSeconds(it))
-                            }
-                        } else null
+                val extractor = MediaExtractor()
+                val keyframes = mutableListOf<KeyframeTimestamp>()
+                try {
+                    extractor.setDataSource(filePath)
+                    val videoTrackIndex = (0 until extractor.trackCount).firstOrNull { i ->
+                        val mime = extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME)
+                        mime?.startsWith("video/") == true
+                    } ?: return@runCatching emptyList()
+
+                    extractor.selectTrack(videoTrackIndex)
+                    extractor.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+
+                    var lastTimeUs = -1L
+                    while (true) {
+                        val timeUs = extractor.sampleTime
+                        if (timeUs < 0 || timeUs == lastTimeUs) break // نهاية الملف أو توقف التقدم
+                        keyframes.add(KeyframeTimestamp(Microseconds(timeUs)))
+                        lastTimeUs = timeUs
+                        extractor.seekTo(timeUs + 1, MediaExtractor.SEEK_TO_NEXT_SYNC)
                     }
-                    .toList()
+                } finally {
+                    extractor.release()
+                }
+                keyframes
             }
         }
 

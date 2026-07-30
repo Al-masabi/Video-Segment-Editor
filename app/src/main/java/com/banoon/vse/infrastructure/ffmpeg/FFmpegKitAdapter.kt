@@ -11,11 +11,14 @@ import com.banoon.vse.domain.model.SegmentProcessingMode
 import com.banoon.vse.domain.model.VideoStreamInfo
 import com.banoon.vse.domain.port.FfmpegPort
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.coroutines.resume
 
 /**
  * تطبيق حقيقي لمنفذ FFmpeg باستخدام FFmpegKit.
@@ -92,7 +95,7 @@ class FFmpegKitAdapter @Inject constructor() : FfmpegPort {
         currentSession?.sessionId?.let { FFmpegKit.cancel(it) }
     }
 
-    private fun extractSegment(
+    private suspend fun extractSegment(
         inputPath: String,
         segment: PlannedSegment,
         tempDir: File,
@@ -104,7 +107,7 @@ class FFmpegKitAdapter @Inject constructor() : FfmpegPort {
         return outputFile
     }
 
-    private fun extractSegmentDirect(
+    private suspend fun extractSegmentDirect(
         inputPath: String,
         segment: PlannedSegment,
         outputFile: File,
@@ -117,7 +120,7 @@ class FFmpegKitAdapter @Inject constructor() : FfmpegPort {
             SegmentProcessingMode.STREAM_COPY -> {
                 // المدى واقع على keyframe، فالبحث السريع قبل -i دقيق بما يكفي
                 // وأسرع بكثير من فك التشفير الكامل.
-                "-ss $startSec -i \"$inputPath\" -t $durationSec -c copy " +
+                "-y -ss $startSec -i \"$inputPath\" -t $durationSec -c copy " +
                     "-map 0 -map_metadata 0 -avoid_negative_ts make_zero \"${outputFile.absolutePath}\""
             }
             SegmentProcessingMode.RE_ENCODE_BOUNDARY -> {
@@ -129,7 +132,7 @@ class FFmpegKitAdapter @Inject constructor() : FfmpegPort {
                 val coarseSeek = (startSec - 5.0).coerceAtLeast(0.0)
                 val fineSeek = startSec - coarseSeek
                 val encodeArgs = buildReEncodeArgs(sourceVideo)
-                "-ss $coarseSeek -i \"$inputPath\" -ss $fineSeek -t $durationSec $encodeArgs " +
+                "-y -ss $coarseSeek -i \"$inputPath\" -ss $fineSeek -t $durationSec $encodeArgs " +
                     "-map 0 -map_metadata 0 -avoid_negative_ts make_zero \"${outputFile.absolutePath}\""
             }
         }
@@ -159,11 +162,11 @@ class FFmpegKitAdapter @Inject constructor() : FfmpegPort {
         return "$videoArgs -pix_fmt $pixFmt$hdrFlags -c:a aac -b:a 320k"
     }
 
-    private fun concatSegments(segmentFiles: List<File>, outputFile: File) {
+    private suspend fun concatSegments(segmentFiles: List<File>, outputFile: File) {
         val listFile = File(outputFile.parentFile, "concat_${UUID.randomUUID()}.txt")
         listFile.writeText(segmentFiles.joinToString("\n") { "file '${it.absolutePath}'" })
 
-        val command = "-f concat -safe 0 -i \"${listFile.absolutePath}\" -c copy -map 0 " +
+        val command = "-y -f concat -safe 0 -i \"${listFile.absolutePath}\" -c copy -map 0 " +
             "\"${outputFile.absolutePath}\""
 
         try {
@@ -173,12 +176,39 @@ class FFmpegKitAdapter @Inject constructor() : FfmpegPort {
         }
     }
 
-    private fun runFFmpegCommand(command: String) {
-        val session = FFmpegKit.execute(command)
-        currentSession = session
-        if (!ReturnCode.isSuccess(session.returnCode)) {
+    /**
+     * ينفّذ أمر FFmpeg بشكل غير متزامن (executeAsync) مع مهلة زمنية قصوى.
+     * سابقًا كنا نستخدم FFmpegKit.execute() المتزامن (يحجب حتى الانتهاء)
+     * بدون أي مهلة — ولو تعلّق الأمر لأي سبب (مثل انتظار تأكيد الكتابة فوق
+     * ملف موجود)، يعلّق التطبيق بصمت للأبد. الآن أي تعليق يوقف تلقائيًا
+     * برسالة خطأ واضحة بدل التعليق الصامت.
+     */
+    private suspend fun runFFmpegCommand(command: String, timeoutMs: Long = 10 * 60 * 1000L) {
+        val completedSession = withTimeoutOrNull(timeoutMs) {
+            suspendCancellableCoroutine<FFmpegSession> { continuation ->
+                val session = FFmpegKit.executeAsync(command) { finishedSession ->
+                    if (continuation.isActive) {
+                        continuation.resume(finishedSession)
+                    }
+                }
+                currentSession = session
+                continuation.invokeOnCancellation {
+                    FFmpegKit.cancel(session.sessionId)
+                }
+            }
+        }
+
+        if (completedSession == null) {
+            currentSession?.sessionId?.let { FFmpegKit.cancel(it) }
             throw IllegalStateException(
-                "فشل تنفيذ أمر FFmpeg (return code=${session.returnCode}): ${session.failStackTrace}"
+                "انتهت مهلة تنفيذ أمر FFmpeg (تجاوز ${timeoutMs / 60000} دقائق) — تم إلغاء العملية تلقائيًا"
+            )
+        }
+
+        if (!ReturnCode.isSuccess(completedSession.returnCode)) {
+            throw IllegalStateException(
+                "فشل تنفيذ أمر FFmpeg (return code=${completedSession.returnCode}): " +
+                    "${completedSession.failStackTrace}"
             )
         }
     }

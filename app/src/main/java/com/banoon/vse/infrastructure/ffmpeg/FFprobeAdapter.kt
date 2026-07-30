@@ -38,7 +38,11 @@ class FFprobeAdapter @Inject constructor() : MediaProbePort {
             // الفيديو الأساسي لاحقًا — هذا ضروري لعمل Hybrid Smart Rendering،
             // لأن SmartRenderingPlanner يعتمد كليًا على هذه القائمة لقرار
             // النسخ المباشر مقابل إعادة الترميز.
-            val keyframes = extractKeyframes(filePath).getOrDefault(emptyList())
+            val keyframesResult = extractKeyframes(filePath)
+            val keyframes = keyframesResult.getOrDefault(emptyList())
+            val keyframeError = keyframesResult.exceptionOrNull()?.let { e ->
+                "${e.javaClass.simpleName}: ${e.message}"
+            }
 
             val videoStreams = mutableListOf<VideoStreamInfo>()
             val audioStreams = mutableListOf<AudioStreamInfo>()
@@ -65,7 +69,8 @@ class FFprobeAdapter @Inject constructor() : MediaProbePort {
                                 // نربط keyframes بأول مسار فيديو فقط حاليًا (الحالة الشائعة).
                                 // دعم استخراجها لكل مسار فيديو على حدة سيُضاف عند الحاجة الفعلية
                                 // لملفات متعددة مسارات الفيديو.
-                                keyframes = if (isFirstVideoStream) keyframes else emptyList()
+                                keyframes = if (isFirstVideoStream) keyframes else emptyList(),
+                                keyframeExtractionError = if (isFirstVideoStream) keyframeError else null
                             )
                         )
                         isFirstVideoStream = false

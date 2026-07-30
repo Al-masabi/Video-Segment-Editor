@@ -19,7 +19,9 @@ data class VideoStreamInfo(
     val colorRange: ColorRange,
     val isHdr: Boolean,
     val hdrMetadataRaw: String?, // البيانات الوصفية الخام لـ HDR/Dolby Vision عند وجودها
-    val keyframes: List<KeyframeTimestamp>
+    val keyframes: List<KeyframeTimestamp>,
+    /** رسالة تشخيصية إذا فشل استخراج keyframes (بدل ابتلاع الخطأ بصمت). */
+    val keyframeExtractionError: String? = null
 )
 
 data class AudioStreamInfo(

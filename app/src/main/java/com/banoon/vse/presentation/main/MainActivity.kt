@@ -277,6 +277,13 @@ private fun VideoSummary(video: PickedVideoFile?, info: MediaInfo?) {
             Text(text = "معدل الإطارات: ${"%.2f".format(videoStream.frameRate)} fps")
             Text(text = if (videoStream.isHdr) "HDR: نعم" else "HDR: لا")
             Text(text = "نقاط keyframe المكتشفة: ${videoStream.keyframes.size}")
+            videoStream.keyframeExtractionError?.let { err ->
+                Text(
+                    text = "خطأ استخراج keyframe: $err",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
         }
         Text(text = "مسارات الصوت: ${info.audioStreams.size}")
         Text(text = "مسارات الترجمة: ${info.subtitleStreams.size}")

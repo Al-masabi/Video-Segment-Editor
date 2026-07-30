@@ -6,6 +6,7 @@ import com.banoon.vse.domain.model.Microseconds
 import com.banoon.vse.domain.model.OutputMode
 import com.banoon.vse.domain.model.PlannedSegment
 import com.banoon.vse.domain.model.ProcessingPlan
+import com.banoon.vse.domain.model.SegmentChunk
 import com.banoon.vse.domain.model.SegmentProcessingMode
 import com.banoon.vse.domain.model.TimeRange
 import com.banoon.vse.domain.model.TimeRangeSet

@@ -159,10 +159,12 @@ class FFmpegKitAdapter @Inject constructor() : FfmpegPort {
     }
 
     /**
-     * يبني وسائط إعادة الترميز بحيث تطابق كودك المصدر قدر الإمكان، مع
-     * إعدادات سرعة خاصة بكل كودك — لأن `-preset` خيار خاص بـ x264/x265 فقط؛
-     * تمريره لـ VP9 (libvpx-vp9) يُتجاهل بصمت ويرجع الترميز لأبطأ إعداد
-     * افتراضي (قد يبدو وكأن التطبيق "معلّق" بينما هو فعليًا يرمّز ببطء شديد).
+     * يبني وسائط إعادة الترميز. **ملاحظة مهمة**: مكتبة FFmpegKit المستخدمة
+     * (`ffmpeg-kit-16kb`، نسخة LGPL) **لا تحتوي على x264/x265 البرمجية**
+     * (مرخّصة GPL ومستبعدة عمدًا). الحل: استخدام الترميز العتادي عبر
+     * MediaCodec الخاص بأندرويد (`h264_mediacodec` / `hevc_mediacodec`)
+     * وهو متوفر مضمون بكل نسخ FFmpegKit (مكتبة نظام أندرويد، مو خارجية)،
+     * وأسرع بكثير من الترميز البرمجي لأنه يستخدم شريحة الجهاز مباشرة.
      */
     private fun buildReEncodeArgs(sourceVideo: VideoStreamInfo?): String {
         val pixFmt = sourceVideo?.pixelFormat?.takeIf { it != "unknown" } ?: "yuv420p"
@@ -171,10 +173,13 @@ class FFmpegKitAdapter @Inject constructor() : FfmpegPort {
         } else ""
 
         val videoArgs = when (sourceVideo?.codec) {
-            "hevc", "h265" -> "-c:v libx265 -preset slow -crf 16"
+            "hevc", "h265" -> "-c:v hevc_mediacodec -b:v 12M"
+            // VP9/AV1 العتادي غير مضمون التوفر على كل الأجهزة، ونبقي محاولة
+            // المكتبة البرمجية كخطة احتياطية (قد تفشل لو غير متوفرة بهذي
+            // النسخة تحديدًا — رسالة الخطأ الآن واضحة لو صار ذلك).
             "vp9" -> "-c:v libvpx-vp9 -crf 16 -b:v 0 -deadline good -cpu-used 4"
             "av1" -> "-c:v libaom-av1 -crf 16 -b:v 0 -cpu-used 6"
-            else -> "-c:v libx264 -preset slow -crf 16" // h264 أو كودك غير معروف
+            else -> "-c:v h264_mediacodec -b:v 12M" // h264 (الأشيع)، مضمون التوفر عتاديًا
         }
 
         return "$videoArgs -pix_fmt $pixFmt$hdrFlags -c:a aac -b:a 320k"

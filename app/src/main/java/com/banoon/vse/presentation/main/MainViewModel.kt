@@ -117,10 +117,12 @@ class MainViewModel @Inject constructor(
 
         val parsedRanges = mutableListOf<TimeRange>()
         for (input in state.ranges) {
-            val start = input.startSecondsText.toDoubleOrNull()
-            val end = input.endSecondsText.toDoubleOrNull()
+            val start = parseTimeToSeconds(input.startSecondsText)
+            val end = parseTimeToSeconds(input.endSecondsText)
             if (start == null || end == null) {
-                _uiState.update { it.copy(errorMessage = "تأكد من إدخال أرقام صحيحة لكل مدى زمني") }
+                _uiState.update {
+                    it.copy(errorMessage = "صيغة الوقت غير صحيحة — اكتب ثواني (300) أو د:ث (5:00) أو س:د:ث (1:05:00)")
+                }
                 return
             }
             if (end <= start) {
@@ -211,6 +213,28 @@ class MainViewModel @Inject constructor(
                     }
                 }
             )
+        }
+    }
+
+    /**
+     * يحوّل نص وقت مرن إلى ثواني، يدعم 3 صيغ:
+     * - ثانية بسيطة: "300" أو "12.5"
+     * - دقيقة:ثانية: "5:00"
+     * - ساعة:دقيقة:ثانية: "1:05:30"
+     */
+    private fun parseTimeToSeconds(text: String): Double? {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return null
+        val parts = trimmed.split(":")
+        return try {
+            when (parts.size) {
+                1 -> parts[0].toDouble()
+                2 -> parts[0].toDouble() * 60 + parts[1].toDouble()
+                3 -> parts[0].toDouble() * 3600 + parts[1].toDouble() * 60 + parts[2].toDouble()
+                else -> null
+            }
+        } catch (e: NumberFormatException) {
+            null
         }
     }
 

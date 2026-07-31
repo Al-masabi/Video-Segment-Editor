@@ -221,7 +221,11 @@ private fun ModeSelector(current: OperationMode, onSelect: (OperationMode) -> Un
 @Composable
 private fun RangeEditor(ranges: List<TimeRangeInput>, viewModel: MainViewModel) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(text = "المدى الزمني (بالثواني)", style = MaterialTheme.typography.titleSmall)
+        Text(text = "المدى الزمني", style = MaterialTheme.typography.titleSmall)
+        Text(
+            text = "اكتب ثواني (300) أو د:ث (5:00) أو س:د:ث (1:05:00)",
+            style = MaterialTheme.typography.bodySmall
+        )
         Spacer(modifier = Modifier.height(8.dp))
 
         ranges.forEach { range ->
@@ -233,8 +237,9 @@ private fun RangeEditor(ranges: List<TimeRangeInput>, viewModel: MainViewModel) 
                     value = range.startSecondsText,
                     onValueChange = { viewModel.updateRangeStart(range.id, it) },
                     label = { Text("البداية") },
+                    placeholder = { Text("5:00") },
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                        keyboardType = KeyboardType.Decimal
+                        keyboardType = KeyboardType.Text
                     ),
                     modifier = Modifier.weight(1f)
                 )
@@ -243,8 +248,9 @@ private fun RangeEditor(ranges: List<TimeRangeInput>, viewModel: MainViewModel) 
                     value = range.endSecondsText,
                     onValueChange = { viewModel.updateRangeEnd(range.id, it) },
                     label = { Text("النهاية") },
+                    placeholder = { Text("6:00") },
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                        keyboardType = KeyboardType.Decimal
+                        keyboardType = KeyboardType.Text
                     ),
                     modifier = Modifier.weight(1f)
                 )

@@ -224,9 +224,17 @@ class FFmpegKitAdapter @Inject constructor() : FfmpegPort {
         }
 
         if (!ReturnCode.isSuccess(completedSession.returnCode)) {
+            // failStackTrace غالبًا فارغ (null) لفشل FFmpeg العادي (مثل كودك
+            // غير مدعوم أو معامل خاطئ) لأنه مو استثناء Java، هو خروج طبيعي
+            // بكود خطأ. السبب الحقيقي موجود بآخر أسطر اللوق (stderr) بدل ذلك.
+            val logs = completedSession.allLogsAsString
+                ?.lines()
+                ?.filter { it.isNotBlank() }
+                ?.takeLast(6)
+                ?.joinToString(" | ")
+                ?: "لا توجد تفاصيل إضافية"
             throw IllegalStateException(
-                "فشل تنفيذ أمر FFmpeg (return code=${completedSession.returnCode}): " +
-                    "${completedSession.failStackTrace}"
+                "فشل تنفيذ أمر FFmpeg (return code=${completedSession.returnCode}): $logs"
             )
         }
     }
